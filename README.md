@@ -195,4 +195,4 @@ The PAT owner (or service principal) needs:
 
 ## License
 
-Internal use only.
+This project is licensed under the [Databricks License](LICENSE). See the LICENSE file for details.
