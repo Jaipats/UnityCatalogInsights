@@ -149,31 +149,38 @@ def get_user_visible_tables(request: Request) -> set[str]:
             logger.debug(f"ACL cache hit for {user_key}: {len(cached_tables)} tables")
             return cached_tables
 
-    # Query table_privileges for this specific user's grants
-    # This checks: direct user grants, 'account users' group, and ownership
+    # Check all three privilege levels: catalog, schema, and table.
+    # Users typically get access via catalog or schema-level grants (ALL_PRIVILEGES),
+    # which cascade down to all tables. Table-level grants may use UUIDs for SPs.
+    grantees = f"'{user_key}', 'account users', 'users'"
     sql = f"""
-        SELECT DISTINCT CONCAT(table_catalog, '.', table_schema, '.', table_name) AS full_table_name
-        FROM {CATALOG}.information_schema.table_privileges
-        WHERE table_schema != 'information_schema'
-          AND table_name NOT LIKE 'mlflow_%'
-          AND table_name NOT LIKE 'uc_metadata_%'
-          AND (
-            grantee = '{user_key}'
-            OR grantee = 'account users'
-            OR grantee = 'users'
-          )
-          AND privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'MODIFY')
-        UNION
         SELECT DISTINCT CONCAT(t.table_catalog, '.', t.table_schema, '.', t.table_name) AS full_table_name
         FROM {CATALOG}.information_schema.tables t
         WHERE t.table_schema != 'information_schema'
           AND t.table_name NOT LIKE 'mlflow_%'
           AND t.table_name NOT LIKE 'uc_metadata_%'
-          AND EXISTS (
-            SELECT 1 FROM {CATALOG}.information_schema.schema_privileges sp
-            WHERE sp.grantee IN ('{user_key}', 'account users', 'users')
-              AND sp.table_schema = t.table_schema
-              AND sp.privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'USE_SCHEMA')
+          AND (
+            -- 1. Catalog-level grant (cascades to all tables)
+            EXISTS (
+              SELECT 1 FROM {CATALOG}.information_schema.catalog_privileges cp
+              WHERE cp.grantee IN ({grantees})
+                AND cp.privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'USE_CATALOG', 'MANAGE')
+            )
+            -- 2. Schema-level grant (cascades to tables in that schema)
+            OR EXISTS (
+              SELECT 1 FROM {CATALOG}.information_schema.schema_privileges sp
+              WHERE sp.grantee IN ({grantees})
+                AND sp.table_schema = t.table_schema
+                AND sp.privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'USE_SCHEMA', 'MANAGE')
+            )
+            -- 3. Direct table-level grant
+            OR EXISTS (
+              SELECT 1 FROM {CATALOG}.information_schema.table_privileges tp
+              WHERE tp.grantee IN ({grantees})
+                AND tp.table_schema = t.table_schema
+                AND tp.table_name = t.table_name
+                AND tp.privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'MODIFY', 'MANAGE')
+            )
           )
     """
 
