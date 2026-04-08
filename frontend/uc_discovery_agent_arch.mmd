@@ -1,102 +1,85 @@
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1B3A6B",
+    "primaryColor": "#2B6CB0",
     "primaryTextColor": "#FFFFFF",
-    "primaryBorderColor": "#0F2548",
+    "primaryBorderColor": "#1A365D",
     "lineColor": "#4A6FA5",
-    "background": "#FFFDE7",
-    "clusterBkg": "#FFF9C4",
-    "clusterBorder": "#5A7BAD",
-    "titleColor": "#1B3A6B",
-    "edgeLabelBackground": "#FFFDE7",
-    "fontFamily": "Segoe UI, Helvetica Neue, Arial, sans-serif",
+    "background": "#FFFEF5",
+    "clusterBkg": "#FFFEF5",
+    "clusterBorder": "#CBD5E0",
+    "edgeLabelBackground": "#FFFEF5",
+    "fontFamily": "Segoe UI, Helvetica, Arial, sans-serif",
     "fontSize": "13px"
   }
 }}%%
 graph TD
 
-  %% ─────────────────────────────────────────
-  %% SECTION 1: USER & APP
-  %% ─────────────────────────────────────────
-  USER["Browser\nEnd User"]
+  %% ── USER ──
+  USER(["End User / Browser"])
 
-  subgraph APP["User & App Layer"]
-    PROXY["Apps Proxy\nSSO Auth · OBO Token"]
-    subgraph BACKEND["FastAPI Backend"]
-      REACT["Chat UI"]
-      API["API Endpoints\n/chat /tables /me"]
-    end
+  %% ── APP LAYER ──
+  subgraph APP["Databricks App"]
+    PROXY["Apps Proxy\nSSO + OBO Token"]
+    UI["Chat UI"]
+    API["API Endpoints\n/chat · /tables · /me"]
   end
 
-  USER -->|"HTTPS"| PROXY
-  PROXY --> BACKEND
-  REACT <-->|REST| API
+  USER -->|HTTPS| PROXY
+  PROXY --> UI
+  UI <--> API
 
-  %% ─────────────────────────────────────────
-  %% SECTION 2: QUERY FLOW
-  %% ─────────────────────────────────────────
-  ACL["ACL Filter\nUser OBO Token"]
+  %% ── QUERY ORCHESTRATION ──
+  API --> ACL
 
-  subgraph PLATFORM["Query Flow — Databricks Platform"]
-    direction TB
-    VS["Vector Search\n(SP Token)\nSemantic retrieval"]
-    SQL["SQL Statement API\nINFO_SCHEMA ACL check\n(User OBO Token)"]
-    LLM["Foundation Model API\nClaude Sonnet 4\n(SP Token)"]
+  subgraph QUERY["Query Flow"]
+    ACL{{"ACL Filter"}}
+    VS["Vector Search\nSemantic Retrieval"]
+    SQL["SQL Statement API\nINFO_SCHEMA · ACL Check"]
+    LLM["Foundation Model API\nClaude Sonnet 4"]
   end
 
-  API -->|"User question"| ACL
-  ACL -->|"1 Semantic query"| VS
-  VS  -->|"2 Candidate docs"| ACL
-  ACL -->|"3 ACL check"| SQL
-  SQL -->|"4 Permitted objects"| ACL
-  ACL -->|"5 Filtered context"| LLM
-  LLM -->|"Answer"| API
+  ACL -->|"1. Query\n(SP Token)"| VS
+  ACL -->|"2. Permissions\n(User OBO Token)"| SQL
+  VS -->|"Candidates"| ACL
+  SQL -->|"Visible tables"| ACL
+  ACL -->|"3. Filtered context\n(SP Token)"| LLM
+  LLM -->|"4. NL Answer"| API
 
-  %% ─────────────────────────────────────────
-  %% SECTION 3: DATA PIPELINE (offline)
-  %% ─────────────────────────────────────────
-  subgraph PIPELINE["Data Pipeline (Offline / Batch)"]
-    direction TB
-    UC["UC INFORMATION_SCHEMA\ncatalog · schema · table\ncolumn comments · tags · ACLs"]
-    NB["Extraction Notebook\nServerless · NO LLM\nVerbatim UC comments"]
-    DELTA["Delta Table\nuc_metadata_documents\nCDF enabled"]
-    VSIDX["Vector Search Index\nuc_metadata_vs_index"]
+  %% ── DATA PIPELINE ──
+  subgraph PIPELINE["Data Pipeline — Offline"]
+    UC[("UC Metadata\nCatalog · Schema\nTable · Column\nComments · Tags · ACLs")]
+    NB["Extraction Notebook\nServerless · No LLM"]
+    DELTA[("Delta Table\nuc_metadata_documents\nChange Data Feed")]
+    VSIDX["VS Index\nDelta Sync + BGE Embeddings"]
   end
 
-  UC --> NB
-  NB --> DELTA
-  DELTA --> VSIDX
-  VSIDX -.-> VS
+  UC --> NB --> DELTA --> VSIDX
+  VSIDX -.->|"Feeds index"| VS
 
-  %% ─────────────────────────────────────────
-  %% STYLES
-  %% ─────────────────────────────────────────
-  classDef userCls   fill:#1B3A6B,stroke:#0F2548,color:#FFF,font-weight:bold
-  classDef proxyCls  fill:#2C5282,stroke:#1A365D,color:#FFF
-  classDef apiCls    fill:#2B6CB0,stroke:#2C5282,color:#FFF
-  classDef aclCls    fill:#7B341E,stroke:#652B19,color:#FFF,font-weight:bold
-  classDef vsCls     fill:#553C9A,stroke:#44337A,color:#FFF
-  classDef sqlCls    fill:#B7791F,stroke:#975A16,color:#FFF,font-weight:bold
-  classDef llmCls    fill:#C05621,stroke:#9C4221,color:#FFF,font-weight:bold
-  classDef ucCls     fill:#276749,stroke:#1C4532,color:#FFF
-  classDef nbCls     fill:#2F855A,stroke:#276749,color:#FFF
-  classDef deltaCls  fill:#285E61,stroke:#1D4044,color:#FFF
-  classDef vsidxCls  fill:#553C9A,stroke:#44337A,color:#FFF
+  %% ── STYLES ──
+  classDef user     fill:#1A365D,stroke:#0F2548,color:#FFF,font-weight:bold
+  classDef app      fill:#2B6CB0,stroke:#1A365D,color:#FFF
+  classDef acl      fill:#9B2C2C,stroke:#742A2A,color:#FFF,font-weight:bold
+  classDef vs       fill:#553C9A,stroke:#44337A,color:#FFF
+  classDef sql      fill:#B7791F,stroke:#975A16,color:#FFF,font-weight:bold
+  classDef llm      fill:#C05621,stroke:#9C4221,color:#FFF,font-weight:bold
+  classDef uc       fill:#276749,stroke:#1C4532,color:#FFF
+  classDef nb       fill:#2F855A,stroke:#276749,color:#FFF
+  classDef delta    fill:#285E61,stroke:#1D4044,color:#FFF
+  classDef vsidx    fill:#553C9A,stroke:#44337A,color:#FFF
 
-  class USER userCls
-  class PROXY proxyCls
-  class REACT,API apiCls
-  class ACL aclCls
-  class VS vsCls
-  class SQL sqlCls
-  class LLM llmCls
-  class UC ucCls
-  class NB nbCls
-  class DELTA deltaCls
-  class VSIDX vsidxCls
+  class USER user
+  class PROXY,UI,API app
+  class ACL acl
+  class VS vsidx
+  class SQL sql
+  class LLM llm
+  class UC uc
+  class NB nb
+  class DELTA delta
+  class VSIDX vsidx
 
   style APP      fill:#EBF4FF,stroke:#2B6CB0,stroke-width:2px,color:#1A365D
-  style BACKEND  fill:#BEE3F8,stroke:#3182CE,stroke-width:1.5px,stroke-dasharray:4 3,color:#1A365D
-  style PLATFORM fill:#FFF5F5,stroke:#C53030,stroke-width:2px,color:#63171B
-  style PIPELINE fill:#F0FDF4,stroke:#2D6A4F,stroke-width:2px,color:#1B4332
+  style QUERY    fill:#FFF5F5,stroke:#E53E3E,stroke-width:2px,color:#742A2A
+  style PIPELINE fill:#F0FFF4,stroke:#38A169,stroke-width:2px,color:#1B4332
