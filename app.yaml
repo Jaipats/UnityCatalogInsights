@@ -1,0 +1,23 @@
+command:
+  - uvicorn
+  - backend.main:app
+  - --host=0.0.0.0
+  - --port=8000
+
+env:
+  - name: DATABRICKS_HOST
+    valueFrom: workspace-url
+  - name: DATABRICKS_TOKEN
+    value: "<YOUR_PAT_TOKEN>"  # Replace with your Databricks PAT
+  - name: VS_ENDPOINT
+    value: "mas-587f2f3d-endpoint"
+  - name: VS_INDEX
+    value: "experian_agent_demo_catalog.experian_agent_demo.uc_metadata_vs_index"
+  - name: LLM_ENDPOINT
+    value: "databricks-claude-sonnet-4"
+  - name: UC_CATALOG
+    value: "experian_agent_demo_catalog"
+  - name: UC_SCHEMA
+    value: "experian_agent_demo"
+  - name: WAREHOUSE_ID
+    value: "e87eb7290d6ba0c1"

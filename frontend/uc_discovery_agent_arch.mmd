@@ -1,0 +1,91 @@
+flowchart TD
+    %% ─────────────────────────────────────────────
+    %% External Actor
+    %% ─────────────────────────────────────────────
+    USER["User\n(Browser)"]
+
+    %% ─────────────────────────────────────────────
+    %% Databricks App
+    %% ─────────────────────────────────────────────
+    subgraph APP["  Databricks App  "]
+        direction TB
+        PROXY["Databricks Apps Proxy\n(SSO Authentication)"]
+
+        subgraph BACKEND["FastAPI Backend  (port 8000)"]
+            direction TB
+            UI["React Chat UI\n(Single-Page HTML)"]
+            ENDPOINTS["API Endpoints\n/api/chat  |  /api/tables\n/api/me  |  /api/health"]
+            ACL_FILTER["ACL Filter Layer\nFilter VS results by\nUnity Catalog permissions"]
+        end
+    end
+
+    %% ─────────────────────────────────────────────
+    %% Databricks Platform Services
+    %% ─────────────────────────────────────────────
+    subgraph PLATFORM["  Databricks Platform Services  "]
+        direction LR
+        VS["Mosaic AI Vector Search\nEndpoint: mas-587f2f3d-endpoint\nIndex: uc_metadata_vs_index"]
+        LLM["Foundation Model API\nClaude Sonnet 4\ndatabricks-claude-sonnet-4"]
+        INFO_SCHEMA_RT["SQL Statement API\nINFORMATION_SCHEMA\n(runtime ACL check,\non-behalf-of user)"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% Data Pipeline
+    %% ─────────────────────────────────────────────
+    subgraph PIPELINE["  Data Pipeline  (Offline Indexing)  "]
+        direction LR
+        INFO_SCHEMA_ETL["Unity Catalog\nINFORMATION_SCHEMA\n(tables, columns,\ntags, ACLs)"]
+        EXTRACT["Extraction Notebook\n(Serverless Compute)"]
+        LLM_ENRICH["Foundation Model API\nClaude Sonnet 4\n(AI-enriched descriptions)"]
+        DELTA["Delta Table\nuc_metadata_documents\n(Change Data Feed)"]
+        VS_SYNC["Vector Search Index\n(Delta Sync Pipeline)"]
+    end
+
+    %% ─────────────────────────────────────────────
+    %% User → App flow
+    %% ─────────────────────────────────────────────
+    USER -->|"HTTPS"| PROXY
+    PROXY -->|"Authenticated request"| UI
+    UI <-->|"Chat / REST"| ENDPOINTS
+
+    %% Backend → Platform Services
+    ENDPOINTS -->|"1. Semantic search (PAT token)"| VS
+    VS -->|"2. Candidate metadata"| ACL_FILTER
+    ENDPOINTS -->|"3. Check permissions\n(SQL Statement API)"| INFO_SCHEMA_RT
+    INFO_SCHEMA_RT -->|"4. Permitted tables"| ACL_FILTER
+    ACL_FILTER -->|"5. Filtered context\n+ user question"| LLM
+    LLM -->|"6. Natural language answer"| ENDPOINTS
+
+    %% ─────────────────────────────────────────────
+    %% Data Pipeline flows
+    %% ─────────────────────────────────────────────
+    INFO_SCHEMA_ETL -->|"Raw metadata"| EXTRACT
+    EXTRACT -->|"Generate descriptions"| LLM_ENRICH
+    LLM_ENRICH -->|"Enriched text"| EXTRACT
+    EXTRACT -->|"Write documents"| DELTA
+    DELTA -->|"Delta Sync"| VS_SYNC
+    VS_SYNC -.->|"Populates index"| VS
+
+    %% ─────────────────────────────────────────────
+    %% Styles
+    %% ─────────────────────────────────────────────
+    classDef userNode      fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#1A237E,font-weight:bold
+    classDef proxyNode     fill:#FFF8E1,stroke:#F9A825,stroke-width:2px,color:#3E2723,font-weight:bold
+    classDef backendNode   fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1
+    classDef filterNode    fill:#FCE4EC,stroke:#C62828,stroke-width:2px,color:#880E4F,font-weight:bold
+    classDef platformNode  fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20
+    classDef pipelineNode  fill:#F3E5F5,stroke:#6A1B9A,stroke-width:2px,color:#4A148C
+    classDef deltaNode     fill:#EDE7F6,stroke:#4527A0,stroke-width:2px,color:#311B92
+
+    class USER userNode
+    class PROXY proxyNode
+    class UI,ENDPOINTS backendNode
+    class ACL_FILTER filterNode
+    class VS,LLM,INFO_SCHEMA_RT platformNode
+    class EXTRACT,LLM_ENRICH pipelineNode
+    class INFO_SCHEMA_ETL,DELTA,VS_SYNC deltaNode
+
+    style APP      fill:#EFF8FF,stroke:#1565C0,stroke-width:2.5px
+    style BACKEND  fill:#DBEAFE,stroke:#2563EB,stroke-width:1.5px,stroke-dasharray:5 4
+    style PLATFORM fill:#F0FDF4,stroke:#15803D,stroke-width:2.5px
+    style PIPELINE fill:#FAF5FF,stroke:#7C3AED,stroke-width:2.5px
