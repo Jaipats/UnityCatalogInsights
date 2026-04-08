@@ -4,134 +4,99 @@
     "primaryColor": "#1B3A6B",
     "primaryTextColor": "#FFFFFF",
     "primaryBorderColor": "#0F2548",
-    "lineColor": "#5A7BAD",
-    "secondaryColor": "#1F6B45",
-    "tertiaryColor": "#F5F7FA",
+    "lineColor": "#4A6FA5",
     "background": "#FFFFFF",
-    "clusterBkg": "#F0F4FA",
+    "clusterBkg": "#F8FAFC",
     "clusterBorder": "#5A7BAD",
     "titleColor": "#1B3A6B",
     "edgeLabelBackground": "#FFFFFF",
     "fontFamily": "Segoe UI, Helvetica Neue, Arial, sans-serif",
-    "fontSize": "14px"
+    "fontSize": "13px"
   }
 }}%%
-flowchart LR
+graph TD
 
-  %% ─────────────────────────────────────────────
-  %% LEFT: DATA PIPELINE  (offline / batch)
-  %% ─────────────────────────────────────────────
-  subgraph PIPELINE["  Data Pipeline  (Offline / Batch)  "]
-    direction TB
+  %% ─────────────────────────────────────────
+  %% SECTION 1: USER & APP
+  %% ─────────────────────────────────────────
+  USER["Browser\nEnd User"]
 
-    subgraph UC_SRC["Unity Catalog — INFORMATION_SCHEMA  (Source of Truth)"]
-      direction TB
-      UC1["Catalog Comments\n(DESCRIBE CATALOG)"]
-      UC2["Schema Comments\n(schemata)"]
-      UC3["Table Comments\n(tables)"]
-      UC4["Column Comments\n(columns)"]
-      UC5["Tags\n(table_tags / column_tags)"]
-      UC6["ACLs / Privileges\n(table_privileges)"]
+  subgraph APP["User & App Layer"]
+    PROXY["Apps Proxy\nSSO Auth · OBO Token"]
+    subgraph BACKEND["FastAPI Backend"]
+      REACT["Chat UI"]
+      API["API Endpoints\n/chat /tables /me"]
     end
-
-    NB["Extraction Notebook\n(Serverless Compute)\nReads user-authored UC comments only\nNO LLM — direct extraction"]
-
-    DELTA["Delta Table\nuc_metadata_documents\n(Change Data Feed enabled)"]
-
-    SYNC["Delta Sync Pipeline"]
-
-    VS_IDX["Vector Search Index\nuc_metadata_vs_index\n(Endpoint: mas-587f2f3d-endpoint)"]
-
-    NO_LLM["NO LLM in pipeline\nDescriptions = user-authored\nUC comments verbatim"]
-
-    UC_SRC --> NB
-    NB --- NO_LLM
-    NB -->|"Structured documents\nfrom existing UC comments"| DELTA
-    DELTA -->|"CDF incremental sync"| SYNC
-    SYNC -->|"Embeddings indexed"| VS_IDX
   end
 
-  %% ─────────────────────────────────────────────
-  %% MIDDLE: DATABRICKS APP
-  %% ─────────────────────────────────────────────
-  subgraph DBAPP["  Databricks App  "]
+  USER -->|"HTTPS"| PROXY
+  PROXY --> BACKEND
+  REACT <-->|REST| API
+
+  %% ─────────────────────────────────────────
+  %% SECTION 2: QUERY FLOW
+  %% ─────────────────────────────────────────
+  ACL["ACL Filter\nUser OBO Token"]
+
+  subgraph PLATFORM["Query Flow — Databricks Platform"]
     direction TB
-
-    USER["Browser\n(End User)"]
-
-    PROXY["Databricks Apps Proxy\nSSO Auth / Identity Forwarding\nIssues OBO Token"]
-
-    subgraph BACKEND["FastAPI Backend  (port 8000)"]
-      direction TB
-      REACT["React Chat UI\n(served by backend)"]
-      API["API Endpoints\n/api/chat\n/api/tables\n/api/me\n/api/health"]
-      ACL_FILTER["ACL Filter Layer\nIntersects VS candidates with\nINFORMATION_SCHEMA permissions\nAuth: User OBO Token"]
-    end
-
-    USER -->|"HTTPS"| PROXY
-    PROXY -->|"Forwarded identity +\nOBO Token"| BACKEND
-    REACT <-->|"REST"| API
-    API --> ACL_FILTER
+    VS["Vector Search\n(SP Token)\nSemantic retrieval"]
+    SQL["SQL Statement API\nINFO_SCHEMA ACL check\n(User OBO Token)"]
+    LLM["Foundation Model API\nClaude Sonnet 4\n(SP Token)"]
   end
 
-  %% ─────────────────────────────────────────────
-  %% RIGHT: PLATFORM SERVICES
-  %% ─────────────────────────────────────────────
-  subgraph PLATFORM["  Databricks Platform Services  "]
+  API -->|"User question"| ACL
+  ACL -->|"1 Semantic query"| VS
+  VS  -->|"2 Candidate docs"| ACL
+  ACL -->|"3 ACL check"| SQL
+  SQL -->|"4 Permitted objects"| ACL
+  ACL -->|"5 Filtered context"| LLM
+  LLM -->|"Answer"| API
+
+  %% ─────────────────────────────────────────
+  %% SECTION 3: DATA PIPELINE (offline)
+  %% ─────────────────────────────────────────
+  subgraph PIPELINE["Data Pipeline (Offline / Batch)"]
     direction TB
-
-    VS_SVC["Mosaic AI Vector Search\nSemantic retrieval\nEndpoint: mas-587f2f3d-endpoint\nIndex: uc_metadata_vs_index\nAuth: SP Token"]
-
-    SQL_API["SQL Statement API\nINFORMATION_SCHEMA\nPost-retrieval ACL verification\nAuth: User OBO Token"]
-
-    FM_API["Foundation Model API\nClaude Sonnet 4\nGenerates NL answer\nfrom ACL-filtered context\nAuth: SP Token"]
+    UC["UC INFORMATION_SCHEMA\ncatalog · schema · table\ncolumn comments · tags · ACLs"]
+    NB["Extraction Notebook\nServerless · NO LLM\nVerbatim UC comments"]
+    DELTA["Delta Table\nuc_metadata_documents\nCDF enabled"]
+    VSIDX["Vector Search Index\nuc_metadata_vs_index"]
   end
 
-  %% ─────────────────────────────────────────────
-  %% CROSS-SUBGRAPH EDGES
-  %% ─────────────────────────────────────────────
+  UC --> NB
+  NB -->|"Structured docs"| DELTA
+  DELTA -->|"CDF incremental sync"| VSIDX
+  VSIDX -.->|"index feeds runtime"| VS
 
-  %% Pipeline feeds Vector Search index
-  VS_IDX -.->|"index populated\n(offline)"| VS_SVC
-
-  %% Backend → Platform (numbered query flow)
-  ACL_FILTER -->|"1  Semantic query\nSP Token"| VS_SVC
-  VS_SVC -->|"2  Candidate metadata\ndocs returned"| ACL_FILTER
-  ACL_FILTER -->|"3  ACL check query\nUser OBO Token"| SQL_API
-  SQL_API -->|"4  Permitted objects\nreturned"| ACL_FILTER
-  ACL_FILTER -->|"5  Filtered context\n+ user question\nSP Token"| FM_API
-  FM_API -->|"6  Natural language\nanswer"| API
-
-  %% ─────────────────────────────────────────────
+  %% ─────────────────────────────────────────
   %% STYLES
-  %% ─────────────────────────────────────────────
+  %% ─────────────────────────────────────────
+  classDef userCls   fill:#1B3A6B,stroke:#0F2548,color:#FFF,font-weight:bold
+  classDef proxyCls  fill:#2C5282,stroke:#1A365D,color:#FFF
+  classDef apiCls    fill:#2B6CB0,stroke:#2C5282,color:#FFF
+  classDef aclCls    fill:#7B341E,stroke:#652B19,color:#FFF,font-weight:bold
+  classDef vsCls     fill:#553C9A,stroke:#44337A,color:#FFF
+  classDef sqlCls    fill:#B7791F,stroke:#975A16,color:#FFF,font-weight:bold
+  classDef llmCls    fill:#C05621,stroke:#9C4221,color:#FFF,font-weight:bold
+  classDef ucCls     fill:#276749,stroke:#1C4532,color:#FFF
+  classDef nbCls     fill:#2F855A,stroke:#276749,color:#FFF
+  classDef deltaCls  fill:#285E61,stroke:#1D4044,color:#FFF
+  classDef vsidxCls  fill:#553C9A,stroke:#44337A,color:#FFF
 
-  classDef userNode     fill:#1B3A6B,stroke:#0F2548,color:#FFFFFF,font-weight:bold
-  classDef proxyNode    fill:#2C5282,stroke:#1A365D,color:#FFFFFF
-  classDef backendNode  fill:#2B6CB0,stroke:#2C5282,color:#FFFFFF
-  classDef aclNode      fill:#7B341E,stroke:#652B19,color:#FFFFFF,font-weight:bold
-  classDef ucNode       fill:#276749,stroke:#1C4532,color:#FFFFFF
-  classDef pipeNode     fill:#2F855A,stroke:#276749,color:#FFFFFF
-  classDef noLLMNode    fill:#C53030,stroke:#9B2C2C,color:#FFFFFF,font-weight:bold
-  classDef deltaNode    fill:#285E61,stroke:#1D4044,color:#FFFFFF
-  classDef vsNode       fill:#553C9A,stroke:#44337A,color:#FFFFFF
-  classDef fmNode       fill:#C05621,stroke:#9C4221,color:#FFFFFF,font-weight:bold
-  classDef sqlNode      fill:#B7791F,stroke:#975A16,color:#FFFFFF,font-weight:bold
+  class USER userCls
+  class PROXY proxyCls
+  class REACT,API apiCls
+  class ACL aclCls
+  class VS vsCls
+  class SQL sqlCls
+  class LLM llmCls
+  class UC ucCls
+  class NB nbCls
+  class DELTA deltaCls
+  class VSIDX vsidxCls
 
-  class USER userNode
-  class PROXY proxyNode
-  class REACT,API backendNode
-  class ACL_FILTER aclNode
-  class UC1,UC2,UC3,UC4,UC5,UC6 ucNode
-  class NB pipeNode
-  class NO_LLM noLLMNode
-  class DELTA,SYNC deltaNode
-  class VS_IDX,VS_SVC vsNode
-  class FM_API fmNode
-  class SQL_API sqlNode
-
-  style PIPELINE fill:#F0FDF4,stroke:#2D6A4F,stroke-width:2.5px,color:#1B4332
-  style UC_SRC   fill:#D8F3DC,stroke:#52B788,stroke-width:1.5px,color:#1B4332
-  style DBAPP    fill:#EBF4FF,stroke:#2B6CB0,stroke-width:2.5px,color:#1A365D
-  style BACKEND  fill:#BEE3F8,stroke:#3182CE,stroke-width:1.5px,stroke-dasharray:5 4,color:#1A365D
-  style PLATFORM fill:#FFF5F5,stroke:#C53030,stroke-width:2.5px,color:#63171B
+  style APP      fill:#EBF4FF,stroke:#2B6CB0,stroke-width:2px,color:#1A365D
+  style BACKEND  fill:#BEE3F8,stroke:#3182CE,stroke-width:1.5px,stroke-dasharray:4 3,color:#1A365D
+  style PLATFORM fill:#FFF5F5,stroke:#C53030,stroke-width:2px,color:#63171B
+  style PIPELINE fill:#F0FDF4,stroke:#2D6A4F,stroke-width:2px,color:#1B4332
