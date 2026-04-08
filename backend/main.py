@@ -115,80 +115,12 @@ def get_user_info(request: Request) -> dict:
     }
 
 
-# --- User-Visible Tables (ACL enforcement via INFORMATION_SCHEMA) ---
-# Cache of user -> (timestamp, set of visible table names)
-_user_acl_cache: dict[str, tuple[float, set[str]]] = {}
-_ACL_CACHE_TTL = 300  # 5 minutes
-
+# --- Per-Table ACL Check via SQL DW ---
 WAREHOUSE_ID = os.environ.get("WAREHOUSE_ID", "")
 
 
-def get_user_visible_tables(request: Request) -> set[str]:
-    """
-    Determine which tables the logged-in user can see by querying
-    INFORMATION_SCHEMA.TABLE_PRIVILEGES for their explicit grants.
-
-    The x-forwarded-access-token from the Databricks Apps proxy often lacks
-    the 'sql' scope needed to execute SQL. So we use the SP token to run the
-    query, but filter by the user's email from the proxy headers to check
-    only THEIR grants.
-
-    We check both direct user grants and grants to 'account users' (all users).
-    Results are cached per-user for 5 minutes.
-    """
-    import time
-
-    user = get_user_info(request)
-    user_key = user.get("email", "unknown")
-    now = time.time()
-
-    if not user_key or user_key == "unknown":
-        logger.error("No user identity found in request headers")
-        return set()
-
-    # Check cache
-    if user_key in _user_acl_cache:
-        cached_time, cached_tables = _user_acl_cache[user_key]
-        if now - cached_time < _ACL_CACHE_TTL:
-            logger.debug(f"ACL cache hit for {user_key}: {len(cached_tables)} tables")
-            return cached_tables
-
-    # Check all three privilege levels: catalog, schema, and table.
-    # Grantees can appear as email, numeric user ID, or group name depending on level.
-    user_id = user.get("user_id", "")
-    grantees = f"'{user_key}', '{user_id}', 'account users', 'users'"
-    logger.info(f"ACL check for {user_key} (id={user_id})")
-    sql = f"""
-        SELECT DISTINCT CONCAT(t.table_catalog, '.', t.table_schema, '.', t.table_name) AS full_table_name
-        FROM {CATALOG}.information_schema.tables t
-        WHERE t.table_schema != 'information_schema'
-          AND t.table_name NOT LIKE 'mlflow_%'
-          AND t.table_name NOT LIKE 'uc_metadata_%'
-          AND (
-            -- 1. Catalog-level grant (cascades to all tables)
-            EXISTS (
-              SELECT 1 FROM {CATALOG}.information_schema.catalog_privileges cp
-              WHERE cp.grantee IN ({grantees})
-                AND cp.privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'USE_CATALOG', 'MANAGE')
-            )
-            -- 2. Schema-level grant (cascades to tables in that schema)
-            OR EXISTS (
-              SELECT 1 FROM {CATALOG}.information_schema.schema_privileges sp
-              WHERE sp.grantee IN ({grantees})
-                AND sp.table_schema = t.table_schema
-                AND sp.privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'USE_SCHEMA', 'MANAGE')
-            )
-            -- 3. Direct table-level grant
-            OR EXISTS (
-              SELECT 1 FROM {CATALOG}.information_schema.table_privileges tp
-              WHERE tp.grantee IN ({grantees})
-                AND tp.table_schema = t.table_schema
-                AND tp.table_name = t.table_name
-                AND tp.privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'MODIFY', 'MANAGE')
-            )
-          )
-    """
-
+def _run_sql(sql: str) -> dict:
+    """Execute SQL via Statement API using SP token. Returns the response JSON."""
     url = f"{DATABRICKS_HOST}/api/2.0/sql/statements"
     payload = {
         "statement": sql,
@@ -196,54 +128,78 @@ def get_user_visible_tables(request: Request) -> set[str]:
         "wait_timeout": "30s",
         "on_wait_timeout": "CANCEL",
     }
-
-    # Use SP token (has sql permissions) — user filtering is in the WHERE clause
     resp = requests.post(url, headers=_sp_headers(), json=payload)
-
     if resp.status_code != 200:
-        logger.error(f"ACL query failed for {user_key}: {resp.status_code} {resp.text}")
+        logger.error(f"SQL API error: {resp.status_code} {resp.text}")
+        return {}
+    return resp.json()
+
+
+def check_user_table_access(request: Request, table_names: list[str]) -> set[str]:
+    """
+    For each table returned by Vector Search, check if the logged-in user
+    has access by running SHOW GRANTS on each table via SQL DW and looking
+    for the user's email or ID in the results.
+
+    Returns the subset of table_names the user can access.
+    """
+    if not table_names:
         return set()
 
-    data = resp.json()
-    status = data.get("status", {}).get("state", "")
+    user = get_user_info(request)
+    user_email = user.get("email", "")
+    user_id = user.get("user_id", "")
 
-    if status != "SUCCEEDED":
-        logger.error(f"ACL query did not succeed for {user_key}: {status} — {data.get('status', {}).get('error', {}).get('message', '')}")
+    if not user_email:
+        logger.error("No user email in request headers — denying access")
         return set()
 
-    # Extract table names from result
-    visible_tables = set()
-    result_data = data.get("result", {})
-    for chunk in result_data.get("data_array", []):
-        if chunk and chunk[0]:
-            visible_tables.add(chunk[0])
+    logger.info(f"Checking access for {user_email} (id={user_id}) on {len(table_names)} tables")
 
-    # Cache the result
-    _user_acl_cache[user_key] = (now, visible_tables)
-    logger.info(f"ACL check for {user_key}: {len(visible_tables)} visible tables")
+    accessible = set()
+    for table_name in table_names:
+        try:
+            sql = f"SHOW GRANTS ON TABLE {table_name}"
+            data = _run_sql(sql)
 
-    return visible_tables
+            if data.get("status", {}).get("state") != "SUCCEEDED":
+                logger.warning(f"SHOW GRANTS failed for {table_name}: {data.get('status', {})}")
+                continue
+
+            # Check if user's email, ID, or a group they belong to has a grant
+            for row in data.get("result", {}).get("data_array", []):
+                # SHOW GRANTS returns: [principal, action_type, object_type, object_key]
+                if not row or len(row) < 2:
+                    continue
+                grantee = str(row[0]).lower()
+                if (
+                    grantee == user_email.lower()
+                    or grantee == user_id
+                    or grantee in ("account users", "users")
+                ):
+                    accessible.add(table_name)
+                    logger.debug(f"  {table_name}: ACCESS GRANTED (grantee={row[0]}, action={row[1]})")
+                    break
+            else:
+                logger.debug(f"  {table_name}: ACCESS DENIED for {user_email}")
+
+        except Exception as e:
+            logger.error(f"Error checking grants on {table_name}: {e}")
+            continue
+
+    logger.info(f"Access check result: {len(accessible)}/{len(table_names)} tables accessible")
+    return accessible
 
 
-# --- Vector Search + Post-Retrieval ACL Filtering ---
+# --- Vector Search + Per-Table ACL Filtering ---
 def search_uc_metadata(request: Request, query: str, num_results: int = 5) -> list[dict]:
     """
-    Search the UC metadata Vector Search index, then filter results to only
-    include tables the current user has access to (via INFORMATION_SCHEMA).
-
-    Vector Search itself does NOT enforce row-level UC permissions —
-    INFORMATION_SCHEMA is the authoritative filter.
+    1. Query Vector Search for semantically relevant tables
+    2. For each table, check if the user has access via SHOW GRANTS
+    3. Only return tables the user can access
     """
-    # Step 1: Get user's visible tables from INFORMATION_SCHEMA (fail-closed)
-    visible_tables = get_user_visible_tables(request)
-    logger.info(f"User can see {len(visible_tables)} tables")
-
-    if not visible_tables:
-        logger.warning("User has no visible tables — returning empty results")
-        return []
-
-    # Step 2: Query Vector Search (fetch extra results to compensate for filtering)
-    fetch_count = num_results * 3
+    # Step 1: Query Vector Search
+    fetch_count = num_results * 3  # Fetch extra to compensate for filtering
     url = f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{VS_INDEX}/query"
     payload = {
         "query_text": query,
@@ -254,14 +210,9 @@ def search_uc_metadata(request: Request, query: str, num_results: int = 5) -> li
         "num_results": fetch_count,
     }
 
-    # Use SP token for Vector Search (system-level resource)
     resp = requests.post(url, headers=_sp_headers(), json=payload)
     if resp.status_code == 403:
-        logger.warning(f"User lacks permission to query Vector Search index")
-        raise HTTPException(
-            status_code=403,
-            detail="You don't have permission to query this catalog index. Contact your admin.",
-        )
+        raise HTTPException(status_code=403, detail="No permission to query the catalog index.")
     if resp.status_code != 200:
         logger.error(f"Vector Search error: {resp.status_code} {resp.text}")
         raise HTTPException(status_code=502, detail=f"Vector Search query failed: {resp.text}")
@@ -275,11 +226,22 @@ def search_uc_metadata(request: Request, query: str, num_results: int = 5) -> li
         row_dict = dict(zip(col_names, row))
         results.append(row_dict)
 
-    # Step 3: Filter by user's UC permissions (always enforced)
-    filtered = [r for r in results if r.get("table_name") in visible_tables]
+    if not results:
+        return []
+
+    # Step 2: Check each table's access via SHOW GRANTS
+    table_names = list({r.get("table_name") for r in results if r.get("table_name")})
+    accessible_tables = check_user_table_access(request, table_names)
+
+    if not accessible_tables:
+        logger.warning("User has no access to any returned tables")
+        return []
+
+    # Step 3: Filter results to only accessible tables
+    filtered = [r for r in results if r.get("table_name") in accessible_tables]
     removed = len(results) - len(filtered)
     if removed > 0:
-        logger.info(f"ACL filter removed {removed}/{len(results)} results the user cannot access")
+        logger.info(f"ACL filter removed {removed}/{len(results)} results")
 
     return filtered[:num_results]
 
