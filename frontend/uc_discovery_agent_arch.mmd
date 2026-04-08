@@ -25,26 +25,26 @@ graph TD
     API["API Endpoints\n/chat · /tables · /me"]
   end
 
-  USER -->|HTTPS| PROXY
+  USER --> PROXY
   PROXY --> UI
-  UI <--> API
+  UI --> API
 
   %% ── QUERY ORCHESTRATION ──
   API --> ACL
 
   subgraph QUERY["Query Flow"]
     ACL{{"ACL Filter"}}
-    VS["Vector Search\nSemantic Retrieval"]
-    SQL["SQL Statement API\nINFO_SCHEMA · ACL Check"]
-    LLM["Foundation Model API\nClaude Sonnet 4"]
+    VS["1. Vector Search\nSemantic Retrieval\nSP Token"]
+    SQL["2. SQL Statement API\nINFO_SCHEMA ACL Check\nUser OBO Token"]
+    LLM["3. Foundation Model API\nClaude Sonnet 4\nSP Token"]
   end
 
-  ACL -->|"1. Query\n(SP Token)"| VS
-  ACL -->|"2. Permissions\n(User OBO Token)"| SQL
-  VS -->|"Candidates"| ACL
-  SQL -->|"Visible tables"| ACL
-  ACL -->|"3. Filtered context\n(SP Token)"| LLM
-  LLM -->|"4. NL Answer"| API
+  ACL --> VS
+  ACL --> SQL
+  VS --> ACL
+  SQL --> ACL
+  ACL --> LLM
+  LLM --> API
 
   %% ── DATA PIPELINE ──
   subgraph PIPELINE["Data Pipeline — Offline"]
@@ -55,7 +55,7 @@ graph TD
   end
 
   UC --> NB --> DELTA --> VSIDX
-  VSIDX -.->|"Feeds index"| VS
+  VSIDX -.-> VS
 
   %% ── STYLES ──
   classDef user     fill:#1A365D,stroke:#0F2548,color:#FFF,font-weight:bold
