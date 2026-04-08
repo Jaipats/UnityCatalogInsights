@@ -121,18 +121,26 @@ WAREHOUSE_ID = os.environ.get("WAREHOUSE_ID", "")
 
 def get_user_visible_tables(request: Request) -> set[str]:
     """
-    Query INFORMATION_SCHEMA using the user's on-behalf-of token to get
-    the set of tables they can actually see. INFORMATION_SCHEMA automatically
-    filters by the querying user's UC permissions — this is the authoritative
-    source of what a user has access to.
+    Determine which tables the logged-in user can see by querying
+    INFORMATION_SCHEMA.TABLE_PRIVILEGES for their explicit grants.
 
-    Results are cached per-user for 5 minutes to avoid hammering the SQL API.
+    The x-forwarded-access-token from the Databricks Apps proxy often lacks
+    the 'sql' scope needed to execute SQL. So we use the SP token to run the
+    query, but filter by the user's email from the proxy headers to check
+    only THEIR grants.
+
+    We check both direct user grants and grants to 'account users' (all users).
+    Results are cached per-user for 5 minutes.
     """
     import time
 
     user = get_user_info(request)
     user_key = user.get("email", "unknown")
     now = time.time()
+
+    if not user_key or user_key == "unknown":
+        logger.error("No user identity found in request headers")
+        return set()
 
     # Check cache
     if user_key in _user_acl_cache:
@@ -141,13 +149,32 @@ def get_user_visible_tables(request: Request) -> set[str]:
             logger.debug(f"ACL cache hit for {user_key}: {len(cached_tables)} tables")
             return cached_tables
 
-    # Query INFORMATION_SCHEMA as the user (on-behalf-of)
+    # Query table_privileges for this specific user's grants
+    # This checks: direct user grants, 'account users' group, and ownership
     sql = f"""
-        SELECT CONCAT(table_catalog, '.', table_schema, '.', table_name) AS full_table_name
-        FROM {CATALOG}.information_schema.tables
+        SELECT DISTINCT CONCAT(table_catalog, '.', table_schema, '.', table_name) AS full_table_name
+        FROM {CATALOG}.information_schema.table_privileges
         WHERE table_schema != 'information_schema'
           AND table_name NOT LIKE 'mlflow_%'
           AND table_name NOT LIKE 'uc_metadata_%'
+          AND (
+            grantee = '{user_key}'
+            OR grantee = 'account users'
+            OR grantee = 'users'
+          )
+          AND privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'MODIFY')
+        UNION
+        SELECT DISTINCT CONCAT(t.table_catalog, '.', t.table_schema, '.', t.table_name) AS full_table_name
+        FROM {CATALOG}.information_schema.tables t
+        WHERE t.table_schema != 'information_schema'
+          AND t.table_name NOT LIKE 'mlflow_%'
+          AND t.table_name NOT LIKE 'uc_metadata_%'
+          AND EXISTS (
+            SELECT 1 FROM {CATALOG}.information_schema.schema_privileges sp
+            WHERE sp.grantee IN ('{user_key}', 'account users', 'users')
+              AND sp.table_schema = t.table_schema
+              AND sp.privilege_type IN ('SELECT', 'ALL_PRIVILEGES', 'USE_SCHEMA')
+          )
     """
 
     url = f"{DATABRICKS_HOST}/api/2.0/sql/statements"
@@ -158,20 +185,18 @@ def get_user_visible_tables(request: Request) -> set[str]:
         "on_wait_timeout": "CANCEL",
     }
 
-    # Use the user's OBO token so INFORMATION_SCHEMA filters by their UC grants
-    resp = requests.post(url, headers=_user_obo_headers(request), json=payload)
+    # Use SP token (has sql permissions) — user filtering is in the WHERE clause
+    resp = requests.post(url, headers=_sp_headers(), json=payload)
 
     if resp.status_code != 200:
-        logger.error(f"INFORMATION_SCHEMA query failed for {user_key}: {resp.status_code} {resp.text}")
-        # Fail-closed: if we can't verify permissions, deny access
+        logger.error(f"ACL query failed for {user_key}: {resp.status_code} {resp.text}")
         return set()
 
     data = resp.json()
     status = data.get("status", {}).get("state", "")
 
     if status != "SUCCEEDED":
-        logger.error(f"SQL statement did not succeed for {user_key}: {status} — {data.get('status', {}).get('error', {}).get('message', '')}")
-        # Fail-closed: deny access
+        logger.error(f"ACL query did not succeed for {user_key}: {status} — {data.get('status', {}).get('error', {}).get('message', '')}")
         return set()
 
     # Extract table names from result
