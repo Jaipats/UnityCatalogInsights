@@ -37,15 +37,36 @@ SCHEMA = os.environ.get("UC_SCHEMA", "experian_agent_demo")
 
 
 # --- Authentication ---
-# `valueFrom: me` injects a token scoped to the logged-in user.
-# Use DATABRICKS_TOKEN env var for all Databricks API calls.
-_DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
+# Two token types:
+#   1. SP token (_SP_TOKEN): Used for Vector Search and LLM serving endpoints.
+#      These are system-level resources the SP has been granted access to.
+#   2. User OBO token: Extracted from the request Authorization header set by
+#      the Databricks Apps proxy. Used for SQL Statement API calls so that
+#      INFORMATION_SCHEMA queries run as the logged-in user and respect their
+#      UC permissions.
+_SP_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
 
 
-def _api_headers(request: Request = None) -> dict:
-    """Build headers for Databricks API calls using the app token."""
+def _sp_headers() -> dict:
+    """Headers using the service principal token — for Vector Search and LLM."""
     return {
-        "Authorization": f"Bearer {_DATABRICKS_TOKEN}",
+        "Authorization": f"Bearer {_SP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+def _user_obo_headers(request: Request) -> dict:
+    """
+    Headers using the logged-in user's on-behalf-of token — for SQL DW.
+    The Databricks Apps proxy forwards the user's token in the Authorization
+    header. This ensures INFORMATION_SCHEMA queries reflect that user's
+    UC grants, not the SP's.
+    Falls back to SP token if no user token is present (e.g. health checks).
+    """
+    auth_header = request.headers.get("Authorization", "") if request else ""
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else _SP_TOKEN
+    return {
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
@@ -133,7 +154,8 @@ def get_user_visible_tables(request: Request) -> set[str]:
         "on_wait_timeout": "CANCEL",
     }
 
-    resp = requests.post(url, headers=_api_headers(request), json=payload)
+    # Use the user's OBO token so INFORMATION_SCHEMA filters by their UC grants
+    resp = requests.post(url, headers=_user_obo_headers(request), json=payload)
 
     if resp.status_code != 200:
         logger.warning(f"INFORMATION_SCHEMA query failed for {user_key}: {resp.status_code}")
@@ -186,7 +208,8 @@ def search_uc_metadata(request: Request, query: str, num_results: int = 5) -> li
         "num_results": fetch_count,
     }
 
-    resp = requests.post(url, headers=_api_headers(request), json=payload)
+    # Use SP token for Vector Search (system-level resource)
+    resp = requests.post(url, headers=_sp_headers(), json=payload)
     if resp.status_code == 403:
         logger.warning(f"User lacks permission to query Vector Search index")
         raise HTTPException(
@@ -263,8 +286,8 @@ def generate_answer(request: Request, question: str, context_docs: list[dict], u
         "temperature": 0.1,
     }
 
-    # Use user's token for model serving so usage is attributed to them
-    resp = requests.post(url, headers=_api_headers(request), json=payload)
+    # Use SP token for LLM serving endpoint (system-level resource)
+    resp = requests.post(url, headers=_sp_headers(), json=payload)
     if resp.status_code != 200:
         logger.error(f"LLM error: {resp.status_code} {resp.text}")
         raise HTTPException(status_code=502, detail=f"LLM generation failed: {resp.text}")
@@ -280,7 +303,7 @@ def health():
         "host": DATABRICKS_HOST,
         "vs_index": VS_INDEX,
         "llm_endpoint": LLM_ENDPOINT,
-        "token_present": bool(_DATABRICKS_TOKEN),
+        "token_present": bool(_SP_TOKEN),
     }
 
 
