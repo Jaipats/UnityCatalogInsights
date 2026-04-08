@@ -65,9 +65,9 @@ graph TD
   end
 
   UC --> NB
-  NB -->|"Structured docs"| DELTA
-  DELTA -->|"CDF incremental sync"| VSIDX
-  VSIDX -.->|"index feeds runtime"| VS
+  NB --> DELTA
+  DELTA --> VSIDX
+  VSIDX -.-> VS
 
   %% ─────────────────────────────────────────
   %% STYLES
