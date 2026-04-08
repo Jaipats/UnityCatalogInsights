@@ -195,4 +195,4 @@ The PAT owner (or service principal) needs:
 
 ## License
 
-This project is licensed under the [Databricks License](LICENSE). See the LICENSE file for details.
+This project is licensed under the [Apache License 2.0](LICENSE).
