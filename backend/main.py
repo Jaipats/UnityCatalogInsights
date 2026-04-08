@@ -162,17 +162,17 @@ def get_user_visible_tables(request: Request) -> set[str]:
     resp = requests.post(url, headers=_user_obo_headers(request), json=payload)
 
     if resp.status_code != 200:
-        logger.warning(f"INFORMATION_SCHEMA query failed for {user_key}: {resp.status_code}")
-        # On failure, fall back to allowing all results (fail-open for usability)
-        # In production, you may want fail-closed instead
-        return None
+        logger.error(f"INFORMATION_SCHEMA query failed for {user_key}: {resp.status_code} {resp.text}")
+        # Fail-closed: if we can't verify permissions, deny access
+        return set()
 
     data = resp.json()
     status = data.get("status", {}).get("state", "")
 
     if status != "SUCCEEDED":
-        logger.warning(f"SQL statement did not succeed for {user_key}: {status}")
-        return None
+        logger.error(f"SQL statement did not succeed for {user_key}: {status} — {data.get('status', {}).get('error', {}).get('message', '')}")
+        # Fail-closed: deny access
+        return set()
 
     # Extract table names from result
     visible_tables = set()
@@ -197,11 +197,16 @@ def search_uc_metadata(request: Request, query: str, num_results: int = 5) -> li
     Vector Search itself does NOT enforce row-level UC permissions —
     INFORMATION_SCHEMA is the authoritative filter.
     """
-    # Step 1: Get user's visible tables from INFORMATION_SCHEMA
+    # Step 1: Get user's visible tables from INFORMATION_SCHEMA (fail-closed)
     visible_tables = get_user_visible_tables(request)
+    logger.info(f"User can see {len(visible_tables)} tables")
+
+    if not visible_tables:
+        logger.warning("User has no visible tables — returning empty results")
+        return []
 
     # Step 2: Query Vector Search (fetch extra results to compensate for filtering)
-    fetch_count = num_results * 3 if visible_tables is not None else num_results
+    fetch_count = num_results * 3
     url = f"{DATABRICKS_HOST}/api/2.0/vector-search/indexes/{VS_INDEX}/query"
     payload = {
         "query_text": query,
@@ -233,18 +238,13 @@ def search_uc_metadata(request: Request, query: str, num_results: int = 5) -> li
         row_dict = dict(zip(col_names, row))
         results.append(row_dict)
 
-    # Step 3: Filter by user's UC permissions
-    if visible_tables is not None:
-        filtered = [r for r in results if r.get("table_name") in visible_tables]
-        removed = len(results) - len(filtered)
-        if removed > 0:
-            logger.info(f"ACL filter removed {removed} results the user cannot access")
-        results = filtered[:num_results]
-    else:
-        # If ACL check failed, return unfiltered (fail-open)
-        results = results[:num_results]
+    # Step 3: Filter by user's UC permissions (always enforced)
+    filtered = [r for r in results if r.get("table_name") in visible_tables]
+    removed = len(results) - len(filtered)
+    if removed > 0:
+        logger.info(f"ACL filter removed {removed}/{len(results)} results the user cannot access")
 
-    return results
+    return filtered[:num_results]
 
 
 # --- LLM Generation (uses service principal for model serving) ---
