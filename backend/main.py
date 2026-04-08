@@ -58,13 +58,18 @@ def _sp_headers() -> dict:
 def _user_obo_headers(request: Request) -> dict:
     """
     Headers using the logged-in user's on-behalf-of token — for SQL DW.
-    The Databricks Apps proxy forwards the user's token in the Authorization
-    header. This ensures INFORMATION_SCHEMA queries reflect that user's
-    UC grants, not the SP's.
+    The Databricks Apps proxy strips the Authorization header but forwards the
+    user's OAuth token in the `x-forwarded-access-token` header. This token is
+    scoped to the logged-in user, so INFORMATION_SCHEMA queries reflect their
+    UC grants.
     Falls back to SP token if no user token is present (e.g. health checks).
     """
-    auth_header = request.headers.get("Authorization", "") if request else ""
-    token = auth_header[7:] if auth_header.startswith("Bearer ") else _SP_TOKEN
+    obo_token = request.headers.get("x-forwarded-access-token", "") if request else ""
+    token = obo_token if obo_token else _SP_TOKEN
+    if obo_token:
+        logger.info(f"Using user OBO token for SQL DW ({len(obo_token)} chars)")
+    else:
+        logger.warning("No OBO token found, falling back to SP token for SQL DW")
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -97,10 +102,9 @@ class TableDetail(BaseModel):
 
 # --- User Identity ---
 def get_user_info(request: Request) -> dict:
-    """Get the current user's identity from Databricks Apps headers."""
-    # Databricks Apps proxy sets these headers
+    """Get the current user's identity from Databricks Apps proxy headers."""
     user_email = request.headers.get("X-Forwarded-Email", "")
-    user_name = request.headers.get("X-Forwarded-User", "")
+    user_name = request.headers.get("X-Forwarded-Preferred-Username", "")
     return {
         "email": user_email,
         "name": user_name or user_email,
@@ -312,6 +316,27 @@ def get_me(request: Request):
     """Return the current authenticated user's identity."""
     user = get_user_info(request)
     return {"user": user}
+
+
+@app.get("/api/debug/headers")
+def debug_headers(request: Request):
+    """Debug: show what headers the app proxy forwards."""
+    headers = {}
+    for key, value in request.headers.items():
+        if key.lower() in ("authorization",):
+            # Mask the token value but show type and length
+            headers[key] = f"{value[:15]}...({len(value)} chars)" if len(value) > 15 else value
+        else:
+            headers[key] = value
+    auth = request.headers.get("Authorization", "")
+    return {
+        "has_authorization": bool(auth),
+        "auth_type": auth.split(" ")[0] if auth else "(none)",
+        "auth_token_length": len(auth.split(" ", 1)[1]) if " " in auth else 0,
+        "sp_token_length": len(_SP_TOKEN),
+        "tokens_match": (auth.split(" ", 1)[1] == _SP_TOKEN) if " " in auth else False,
+        "headers": headers,
+    }
 
 
 @app.post("/api/chat", response_model=ChatResponse)
