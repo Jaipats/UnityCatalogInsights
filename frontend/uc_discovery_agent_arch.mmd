@@ -33,9 +33,9 @@ graph TD
   API --> ACL
 
   subgraph QUERY["Query Flow"]
-    ACL{{"ACL Filter"}}
+    ACL{{"ACL Filter\n(per-table SHOW GRANTS)"}}
     VS["1. Vector Search\nSemantic Retrieval\nSP Token"]
-    SQL["2. SQL Statement API\nINFO_SCHEMA ACL Check\nUser OBO Token"]
+    SQL["2. SHOW GRANTS per table\nACL Check via SQL DW\nSP Token"]
     LLM["3. Foundation Model API\nClaude Sonnet 4\nSP Token"]
   end
 
