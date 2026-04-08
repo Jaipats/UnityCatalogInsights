@@ -105,9 +105,13 @@ def get_user_info(request: Request) -> dict:
     """Get the current user's identity from Databricks Apps proxy headers."""
     user_email = request.headers.get("X-Forwarded-Email", "")
     user_name = request.headers.get("X-Forwarded-Preferred-Username", "")
+    # x-forwarded-user is "userId@orgId" — extract the user ID
+    forwarded_user = request.headers.get("X-Forwarded-User", "")
+    user_id = forwarded_user.split("@")[0] if "@" in forwarded_user else forwarded_user
     return {
         "email": user_email,
         "name": user_name or user_email,
+        "user_id": user_id,
     }
 
 
@@ -150,9 +154,10 @@ def get_user_visible_tables(request: Request) -> set[str]:
             return cached_tables
 
     # Check all three privilege levels: catalog, schema, and table.
-    # Users typically get access via catalog or schema-level grants (ALL_PRIVILEGES),
-    # which cascade down to all tables. Table-level grants may use UUIDs for SPs.
-    grantees = f"'{user_key}', 'account users', 'users'"
+    # Grantees can appear as email, numeric user ID, or group name depending on level.
+    user_id = user.get("user_id", "")
+    grantees = f"'{user_key}', '{user_id}', 'account users', 'users'"
+    logger.info(f"ACL check for {user_key} (id={user_id})")
     sql = f"""
         SELECT DISTINCT CONCAT(t.table_catalog, '.', t.table_schema, '.', t.table_name) AS full_table_name
         FROM {CATALOG}.information_schema.tables t
